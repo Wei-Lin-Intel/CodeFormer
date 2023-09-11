@@ -61,19 +61,21 @@ S-Lab, Nanyang Technological University
 - Other required packages in `requirements.txt`
 ```
 # git clone this repository
-git clone https://github.com/sczhou/CodeFormer
+git clone --recursive https://github.com/Wei-Lin-Intel/CodeFormer.git
 cd CodeFormer
 
-# create new anaconda env
+# create new virtual env (if your Python3 == 3.8)
+virtualenv -p python3.8 codeformer
+
+# Or create new anaconda env
 conda create -n codeformer python=3.8 -y
 conda activate codeformer
 
 # install python dependencies
 pip3 install -r requirements.txt
 python basicsr/setup.py develop
-conda install -c conda-forge dlib (only for face detection or cropping with dlib)
+pip install dlib (only for face detection or cropping with dlib)
 ```
-<!-- conda install -c conda-forge dlib -->
 
 ### Quick Inference
 
@@ -92,7 +94,7 @@ python scripts/download_pretrained_models.py CodeFormer
 #### Prepare Testing Data:
 You can put the testing images in the `inputs/TestWhole` folder. If you would like to test on cropped and aligned faces, you can put them in the `inputs/cropped_faces` folder. You can get the cropped and aligned faces by running the following command:
 ```
-# you may need to install dlib via: conda install -c conda-forge dlib
+# you may need to install dlib via: pip install dlib
 python scripts/crop_align_face.py -i [input folder] -o [output folder]
 ```
 
@@ -102,11 +104,12 @@ python scripts/crop_align_face.py -i [input folder] -o [output folder]
 
 Fidelity weight *w* lays in [0, 1]. Generally, smaller *w* tends to produce a higher-quality result, while larger *w* yields a higher-fidelity result. The results will be saved in the `results` folder.
 
+We can use the folder, 512k_images, containing 76 figures
 
 🧑🏻 Face Restoration (cropped and aligned face)
 ```
 # For cropped and aligned faces (512x512)
-python inference_codeformer.py -w 0.5 --has_aligned --input_path [image folder]|[image path]
+python inference_codeformer.py -w 0.5 --has_aligned --input_path ./512k_images
 ```
 
 :framed_picture: Whole Image Enhancement
@@ -114,13 +117,13 @@ python inference_codeformer.py -w 0.5 --has_aligned --input_path [image folder]|
 # For whole image
 # Add '--bg_upsampler realesrgan' to enhance the background regions with Real-ESRGAN
 # Add '--face_upsample' to further upsample restorated face with Real-ESRGAN
-python inference_codeformer.py -w 0.7 --input_path [image folder]|[image path]
+python inference_codeformer.py -w 0.7 --input_path [image path]
 ```
 
 :clapper: Video Enhancement
 ```
 # For Windows/Mac users, please install ffmpeg first
-conda install -c conda-forge ffmpeg
+pip install ffmpeg
 ```
 ```
 # For video clips
@@ -132,7 +135,7 @@ python inference_codeformer.py --bg_upsampler realesrgan --face_upsample -w 1.0 
 ```
 # For cropped and aligned faces (512x512)
 # Colorize black and white or faded photo
-python inference_colorization.py --input_path [image folder]|[image path]
+python inference_colorization.py --input_path [image path]
 ```
 
 🎨 Face Inpainting (cropped and aligned face)
@@ -140,7 +143,7 @@ python inference_colorization.py --input_path [image folder]|[image path]
 # For cropped and aligned faces (512x512)
 # Inputs could be masked by white brush using an image editing app (e.g., Photoshop) 
 # (check out the examples in inputs/masked_faces)
-python inference_inpainting.py --input_path [image folder]|[image path]
+python inference_inpainting.py --input_path [image path]
 ```
 ### Training:
 The training commands can be found in the documents: [English](docs/train.md) **|** [简体中文](docs/train_CN.md).
