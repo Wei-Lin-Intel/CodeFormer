@@ -109,8 +109,10 @@ We can use the folder, 512k_images, containing 76 figures
 🧑🏻 Face Restoration (cropped and aligned face)
 ```
 # For cropped and aligned faces (512x512)
-python inference_codeformer.py -w 0.5 --has_aligned --input_path ./512k_images
+python inference_codeformer.py -w 0.5 --compile --fp16 --has_aligned
 ```
+
+`--compile` and `--fp16` may improve the performance of inference.
 
 :framed_picture: Whole Image Enhancement
 ```
