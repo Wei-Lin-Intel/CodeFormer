@@ -1,7 +1,9 @@
 import os
 import cv2
+import time
 import argparse
 import glob
+import numpy as np
 import torch
 from torchvision.transforms.functional import normalize
 from basicsr.utils import imwrite, img2tensor, tensor2img
@@ -57,9 +59,9 @@ if __name__ == '__main__':
     device = get_device()
     parser = argparse.ArgumentParser()
 
-    parser.add_argument('-i', '--input_path', type=str, default='./inputs/whole_imgs', 
+    parser.add_argument('-i', '--input_path', type=str, default='./512k_images', 
             help='Input image, video or folder. Default: inputs/whole_imgs')
-    parser.add_argument('-o', '--output_path', type=str, default=None, 
+    parser.add_argument('-o', '--output_path', type=str, default='./output_images', 
             help='Output folder. Default: results/<input_name>_<w>')
     parser.add_argument('-w', '--fidelity_weight', type=float, default=0.5, 
             help='Balance the quality and fidelity. Default: 0.5')
@@ -78,6 +80,8 @@ if __name__ == '__main__':
     parser.add_argument('--bg_tile', type=int, default=400, help='Tile size for background sampler. Default: 400')
     parser.add_argument('--suffix', type=str, default=None, help='Suffix of the restored faces. Default: None')
     parser.add_argument('--save_video_fps', type=float, default=None, help='Frame rate for saving video. Default: None')
+    parser.add_argument('--fp16', action='store_true', help='Mixed Precision for CodeFormer. Default: False')
+    parser.add_argument('--compile', action='store_true', help='Optimize CodeFormer using Torch Compile. Default: False')
 
     args = parser.parse_args()
 
@@ -141,6 +145,10 @@ if __name__ == '__main__':
     checkpoint = torch.load(ckpt_path)['params_ema']
     net.load_state_dict(checkpoint)
     net.eval()
+    if args.compile:
+        print("Using Torch Compile for CodeFormer...")
+        net = torch.compile(net)
+        print("Torch Compile Optimization for CodeFormer Completed")
 
     # ------------------ set up FaceRestoreHelper -------------------
     # large det_model: 'YOLOv5l', 'retinaface_resnet50'
@@ -160,12 +168,25 @@ if __name__ == '__main__':
         save_ext='png',
         use_parse=True,
         device=device)
+    
+    if args.fp16:
+        print("Convert Face Parser to FP16...")
+        face_helper.face_parse = face_helper.face_parse.half()
+        print("Completed")
+    
+    has_compiled = False
+    face_parser_time = []
+    code_former_time = []
+    face_detector_time = []
+    e2e_time = []
 
     # -------------------- start to processing ---------------------
-    for i, img_path in enumerate(input_img_list):
+    for i, img_path in enumerate(input_img_list):    
+        
+        start = time.time()
         # clean all the intermediate results to process the next image
         face_helper.clean_all()
-        
+                
         if isinstance(img_path, str):
             img_name = os.path.basename(img_path)
             basename, ext = os.path.splitext(img_name)
@@ -187,8 +208,13 @@ if __name__ == '__main__':
         else:
             face_helper.read_image(img)
             # get face landmarks for each face
+            t1 = time.time()
+            #with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=args.fp16):
             num_det_faces = face_helper.get_face_landmarks_5(
                 only_center_face=args.only_center_face, resize=640, eye_dist_threshold=5)
+            t2 = time.time()
+            print("Face Parser Infer Latency: {:.2f} ms".format((t2 - t1) * 1000))
+            face_parser_time.append((t2 - t1) * 1000)
             print(f'\tdetect {num_det_faces} faces')
             # align and warp each face
             face_helper.align_warp_face()
@@ -201,8 +227,16 @@ if __name__ == '__main__':
             cropped_face_t = cropped_face_t.unsqueeze(0).to(device)
 
             try:
-                with torch.no_grad():
+                with torch.no_grad(), torch.autocast(device_type="cuda", dtype=torch.float16, enabled=args.fp16):
+                    if args.compile and not has_compiled:
+                        net(cropped_face_t, w=w, adain=True)
+                        has_compiled = True
+                    t1 = time.time()
                     output = net(cropped_face_t, w=w, adain=True)[0]
+                    torch.cuda.synchronize()
+                    t2 = time.time()
+                    print("CodeFormer Infer Latency: {:.2f} ms".format((t2 - t1) * 1000))
+                    code_former_time.append((t2 - t1) * 1000)
                     restored_face = tensor2img(output, rgb2bgr=True, min_max=(-1, 1))
                 del output
                 torch.cuda.empty_cache()
@@ -223,10 +257,15 @@ if __name__ == '__main__':
                 bg_img = None
             face_helper.get_inverse_affine(None)
             # paste each restored face to the input image
-            if args.face_upsample and face_upsampler is not None: 
-                restored_img = face_helper.paste_faces_to_input_image(upsample_img=bg_img, draw_box=args.draw_box, face_upsampler=face_upsampler)
-            else:
-                restored_img = face_helper.paste_faces_to_input_image(upsample_img=bg_img, draw_box=args.draw_box)
+            t1 = time.time()
+            with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=args.fp16):
+                if args.face_upsample and face_upsampler is not None: 
+                    restored_img = face_helper.paste_faces_to_input_image(upsample_img=bg_img, draw_box=args.draw_box, face_upsampler=face_upsampler)
+                else:
+                    restored_img = face_helper.paste_faces_to_input_image(upsample_img=bg_img, draw_box=args.draw_box)
+            t2 = time.time()
+            print("Face Detector Infer Latency: {:.2f} ms".format((t2 - t1) * 1000))
+            face_detector_time.append((t2 - t1) * 1000)
 
         # save faces
         for idx, (cropped_face, restored_face) in enumerate(zip(face_helper.cropped_faces, face_helper.restored_faces)):
@@ -250,6 +289,16 @@ if __name__ == '__main__':
                 basename = f'{basename}_{args.suffix}'
             save_restore_path = os.path.join(result_root, 'final_results', f'{basename}.png')
             imwrite(restored_img, save_restore_path)
+            
+        end = time.time()
+        print("Code Former E2E Latency: {:.2f} ms".format((end - start) * 1000))
+        e2e_time.append((end - start) * 1000)
+        print("")
+        
+    #print("Face Parser Median Time: {:.2f} ms".format(np.median(face_parser_time)))
+    print("Code Former GPU Hardware Inference Median Time: {:.2f} ms".format(np.median(code_former_time)))
+    #print("Face Detector Median Time: {:.2f} ms".format(np.median(face_detector_time)))
+    print("Code Former E2E Inference Median Time: {:.2f} ms".format(np.median(e2e_time)))
 
     # save enhanced video
     if input_video:
