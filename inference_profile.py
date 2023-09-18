@@ -60,7 +60,7 @@ def set_realesrgan():
 
 if __name__ == '__main__':
     # device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    device = 'hpu'
+    device = torch.device('hpu')
     parser = argparse.ArgumentParser()
 
     parser.add_argument('-i', '--input_path', type=str, default='./512k_images',
@@ -220,105 +220,32 @@ if __name__ == '__main__':
             # align and warp each face
             face_helper.align_warp_face()
 
-        cc = 0
+        activities = [torch.profiler.ProfilerActivity.CPU]
+        activities.append(torch.profiler.ProfilerActivity.HPU)
+
         # face restoration for each cropped face
         for idx, cropped_face in enumerate(face_helper.cropped_faces):
             # prepare data
             cropped_face_t = img2tensor(cropped_face / 255., bgr2rgb=True, float32=True)
             normalize(cropped_face_t, (0.5, 0.5, 0.5), (0.5, 0.5, 0.5), inplace=True)
-            cropped_face_t = cropped_face_t.unsqueeze(0).to(device, non_blocking=True).contiguous(memory_format=torch.channels_last)
+            cropped_face_t = cropped_face_t.unsqueeze(0).contiguous(memory_format=torch.channels_last)
 
             try:
                 with torch.no_grad(), torch.autocast(device_type="hpu", dtype=torch.bfloat16, enabled=args.bf16):
-                    startEv.record()
-                    output = net(cropped_face_t, w=w, adain=True)[0]
-                    if not args.graph:
-                        htcore.mark_step()
-                    #print(output)
-                    endEv.record()
-                    endEv.synchronize()
-                    t2 = time.time()
-                    print("CodeFormer Infer Latency: {:.2f} ms".format(startEv.elapsed_time(endEv)))
-                    code_former_time.append(startEv.elapsed_time(endEv))
-                    restored_face = tensor2img(output.cpu(), rgb2bgr=True, min_max=(-1, 1))
+
+                    if i > 4:
+                        with torch.profiler.profile(
+                            schedule=torch.profiler.schedule(wait=0, warmup=20, active=5, repeat=10),
+                            activities=activities,
+                            on_trace_ready=torch.profiler.tensorboard_trace_handler('logs')) as profiler:
+                            for i in range(100):
+                                output = net(cropped_face_t.to(device, non_blocking = True), w=w, adain=True)[0]
+                                output.to('cpu')
+                                htcore.mark_step()
+                                profiler.step()
+                        exit()
+                    else:
+                        output = net(cropped_face_t.to(device, non_blocking = True), w=w, adain=True)[0]
             except Exception as error:
                 print(f'\tFailed inference for CodeFormer: {error}')
-                restored_face = tensor2img(cropped_face_t, rgb2bgr=True, min_max=(-1, 1))
-
-            restored_face = restored_face.astype('uint8')
-            face_helper.add_restored_face(restored_face, cropped_face)
-
-        # paste_back
-        if not args.has_aligned:
-            # upsample the background
-            if bg_upsampler is not None:
-                # Now only support RealESRGAN for upsampling background
-                bg_img = bg_upsampler.enhance(img, outscale=args.upscale)[0]
-            else:
-                bg_img = None
-            face_helper.get_inverse_affine(None)
-            # paste each restored face to the input image
-            t1 = time.time()
-            if args.face_upsample and face_upsampler is not None:
-                restored_img = face_helper.paste_faces_to_input_image(upsample_img=bg_img, draw_box=args.draw_box, face_upsampler=face_upsampler)
-            else:
-                restored_img = face_helper.paste_faces_to_input_image(upsample_img=bg_img, draw_box=args.draw_box)
-            t2 = time.time()
-            print("Face Detector Infer Latency: {:.2f} ms".format((t2 - t1) * 1000))
-            face_detector_time.append((t2 - t1) * 1000)
-
-        # save faces
-        for idx, (cropped_face, restored_face) in enumerate(zip(face_helper.cropped_faces, face_helper.restored_faces)):
-            # save cropped face
-            if not args.has_aligned:
-                save_crop_path = os.path.join(result_root, 'cropped_faces', f'{basename}_{idx:02d}.png')
-                imwrite(cropped_face, save_crop_path)
-            # save restored face
-            if args.has_aligned:
-                save_face_name = f'{basename}.png'
-            else:
-                save_face_name = f'{basename}_{idx:02d}.png'
-            if args.suffix is not None:
-                save_face_name = f'{save_face_name[:-4]}_{args.suffix}.png'
-            save_restore_path = os.path.join(result_root, 'restored_faces', save_face_name)
-            imwrite(restored_face, save_restore_path)
-
-        # save restored img
-        if not args.has_aligned and restored_img is not None:
-            if args.suffix is not None:
-                basename = f'{basename}_{args.suffix}'
-            save_restore_path = os.path.join(result_root, 'final_results', f'{basename}.png')
-            imwrite(restored_img, save_restore_path)
-
-        end = time.time()
-        print("Code Former E2E Latency: {:.2f} ms".format((end - start) * 1000))
-        e2e_time.append((end - start) * 1000)
-        print("")
-
-    #print("Face Parser Median Time: {:.2f} ms".format(np.median(face_parser_time)))
-    print("Code Former GPU Hardware Inference Median Time: {:.2f} ms".format(np.median(code_former_time)))
-    #print("Face Detector Median Time: {:.2f} ms".format(np.median(face_detector_time)))
-    print("Code Former E2E Inference Median Time: {:.2f} ms".format(np.median(e2e_time)))
-
-    # save enhanced video
-    if input_video:
-        print('Video Saving...')
-        # load images
-        video_frames = []
-        img_list = sorted(glob.glob(os.path.join(result_root, 'final_results', '*.[jp][pn]g')))
-        for img_path in img_list:
-            img = cv2.imread(img_path)
-            video_frames.append(img)
-        # write images to video
-        height, width = video_frames[0].shape[:2]
-        if args.suffix is not None:
-            video_name = f'{video_name}_{args.suffix}.png'
-        save_restore_path = os.path.join(result_root, f'{video_name}.mp4')
-        vidwriter = VideoWriter(save_restore_path, height, width, fps, audio)
-
-        for f in video_frames:
-            vidwriter.write_frame(f)
-        vidwriter.close()
-
-    print(f'\nAll results are saved in {result_root}')
 

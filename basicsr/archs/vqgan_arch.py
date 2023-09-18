@@ -47,7 +47,8 @@ class VectorQuantizer(nn.Module):
         # min_encoding_scores = torch.exp(-min_encoding_scores/10)
 
         min_encodings = torch.zeros(min_encoding_indices.shape[0], self.codebook_size).to(z)
-        min_encodings.scatter_(1, min_encoding_indices, 1)
+        #min_encodings.scatter_(1, min_encoding_indices, 1)
+        min_encodings = torch.scatter(min_encodings, 1, indices, 1)
 
         # get quantized latent vectors
         z_q = torch.matmul(min_encodings, self.embedding.weight).view(z.shape)
@@ -74,7 +75,8 @@ class VectorQuantizer(nn.Module):
         # shape: batch, height, width, channel
         indices = indices.view(-1,1)
         min_encodings = torch.zeros(indices.shape[0], self.codebook_size).to(indices)
-        min_encodings.scatter_(1, indices, 1)
+        #min_encodings.scatter_(1, indices, 1)
+        min_encodings = torch.scatter(min_encodings, 1, indices, 1)
         # get quantized latent vectors
         z_q = torch.matmul(min_encodings.float(), self.embedding.weight)
 

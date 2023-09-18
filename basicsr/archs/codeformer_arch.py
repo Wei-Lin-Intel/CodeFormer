@@ -9,6 +9,8 @@ from basicsr.archs.vqgan_arch import *
 from basicsr.utils import get_root_logger
 from basicsr.utils.registry import ARCH_REGISTRY
 
+from habana_frameworks.torch.hpex.kernels import FusedSDPA
+
 def calc_mean_std(feat, eps=1e-5):
     """Calculate mean and std for adaptive_instance_normalization.
 
@@ -103,6 +105,7 @@ class TransformerSALayer(nn.Module):
         # Implementation of Feedforward model - MLP
         self.linear1 = nn.Linear(embed_dim, dim_mlp)
         self.dropout = nn.Dropout(dropout)
+        self.dropout_val = dropout
         self.linear2 = nn.Linear(dim_mlp, embed_dim)
 
         self.norm1 = nn.LayerNorm(embed_dim)
@@ -123,8 +126,9 @@ class TransformerSALayer(nn.Module):
         # self attention
         tgt2 = self.norm1(tgt)
         q = k = self.with_pos_embed(tgt2, query_pos)
-        tgt2 = self.self_attn(q, k, value=tgt2, attn_mask=tgt_mask,
-                              key_padding_mask=tgt_key_padding_mask)[0]
+        #tgt2 = self.self_attn(q, k, value=tgt2, attn_mask=tgt_mask,
+        #                      key_padding_mask=tgt_key_padding_mask)[0]
+        tgt2 = FusedSDPA.apply(q, k, tgt2, tgt_mask, self.dropout_val)
         tgt = tgt + self.dropout1(tgt2)
 
         # ffn
